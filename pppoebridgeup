@@ -1,0 +1,78 @@
+#!/bin/bash
+# Check for specific interface if desired
+#[ "$PPP_IFACE" = "ppp0" ] || exit 0
+
+# get ip from ppp0 interface
+PPPOEIP=$(/usr/sbin/ip -4 addr show ppp0 | /usr/bin/grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+#now we do some ipcalc magic
+
+#start at 30, then go down until the ip is in the host range
+SUBNETMASK=30
+
+NETWORK=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/Network/ {print substr($2, 1, length($2)-3)}')
+HOSTMIN=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/HostMin/ {print $2}')
+HOSTMAX=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/HostMax/ {print $2}')
+BROADCAST=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/Broadcast/ {print $2}')
+
+echo $PPPOEIP
+echo $NETWORK
+echo $BROADCAST
+#check if PPPOEIP is already possible in /30 Network
+if [ $PPPOEIP = $NETWORK ] || [ $PPPOEIP = $BROADCAST ]; then
+        echo "looping"
+        #loop until PPPOEIP isnt the Network or Broadcast adress anymore
+        while [ $PPPOEIP = $NETWORK ] || [ $PPPOEIP = $BROADCAST ]; do
+                SUBNETMASK="$(($SUBNETMASK-1))"
+                NETWORK=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/Network/ {print substr($2, 1, length($2)-3)}')
+                HOSTMIN=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/HostMin/ {print $2}')
+                HOSTMAX=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/HostMax/ {print $2}')
+                BROADCAST=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/Broadcast/ {print $2}')
+        done
+fi
+
+#gateway is max host ip if possible, min host ip, if not
+if [ $PPPOEIP = $HOSTMIN ]; then
+        GATEWAYIP=$HOSTMAX
+else
+        GATEWAYIP=$HOSTMIN
+fi
+
+#delete IPv4 from pp0 interface
+#/usr/sbin/ip addr flush ppp0
+/usr/sbin/ip addr delete $PPPOEIP dev ppp0
+echo "/usr/sbin/ip addr delete $PPPOEIP dev ppp0"
+
+/usr/sbin/ip addr add $GATEWAYIP/$SUBNETMASK dev enp88s0
+/usr/sbin/ip addr add fd00:a::1/64 dev enp88s0
+
+/usr/sbin/ip addr add 172.16.0.1/24 dev ppp0
+
+#unnecessary
+#/usr/sbin/ip route delete default
+#echo "/usr/sbin/ip route delete default"
+
+/usr/sbin/ip route add default dev ppp0
+/usr/sbin/ip -6 route add default dev ppp0
+echo "/usr/sbin/ip route add default dev ppp0"
+
+/usr/sbin/ip route flush cache
+/usr/sbin/ip -6 route flush cache
+echo "/usr/sbin/ip route flush cache"
+
+#configure dhcp server
+#delete stock dnsmasq config
+rm -f /etc/dnsmasq.conf
+echo "Deleting files"
+#I cant input numbers here i think
+
+SUBNETMASK_dnsmasq=$(/usr/bin/ipcalc -n $PPPOEIP/$SUBNETMASK | /usr/bin/awk '/Netmask/ {print $2}')
+echo $SUBNETMASK_dnsmasq
+
+touch /etc/dnsmasq.conf
+echo "interface=enp88s0" >> /etc/dnsmasq.conf
+echo "port=0" >> /etc/dnsmasq.conf
+echo "dhcp-range=$PPPOEIP,$PPPOEIP,$SUBNETMASK_dnsmasq,5m" >> /etc/dnsmasq.conf
+echo "dhcp-option=3,$GATEWAYIP" >> /etc/dnsmasq.conf
+
+/usr/bin/systemctl start dnsmasq
